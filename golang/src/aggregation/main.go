@@ -4,7 +4,9 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/aggregation"
 )
@@ -80,6 +82,14 @@ func run() int {
 		slog.Error("While initializing aggregation", "err", err)
 		return 1
 	}
+
+	sigterm := make(chan os.Signal, 1)
+	signal.Notify(sigterm, syscall.SIGTERM)
+	go func() {
+		<-sigterm
+		slog.Info("Received SIGTERM, stopping")
+		server.Stop()
+	}()
 
 	server.Run()
 	return 0
