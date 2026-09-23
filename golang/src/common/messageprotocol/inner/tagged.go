@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	dataMessageType = "D"
-	eofMessageType  = "E"
-	topMessageType  = "T"
+	dataMessageType   = "D"
+	eofMessageType    = "E"
+	topMessageType    = "T"
+	reportMessageType = "R"
 )
 
 func SerializeDataMessage(clientId string, fruitRecord fruititem.FruitItem) (*middleware.Message, error) {
@@ -126,4 +127,38 @@ func DeserializeTopMessage(message *middleware.Message) (string, []fruititem.Fru
 	}
 
 	return clientId, fruitTop, true, nil
+}
+
+func SerializeReportMessage(clientId string, replicaId int, count int) (*middleware.Message, error) {
+	body, err := serializeJson([]any{reportMessageType, clientId, replicaId, count})
+	if err != nil {
+		return nil, err
+	}
+	message := middleware.Message{Body: string(body)}
+	return &message, nil
+}
+
+func DeserializeReportMessage(message *middleware.Message) (string, int, int, bool, error) {
+	data, err := deserializeJson([]byte(message.Body))
+	if err != nil {
+		return "", 0, 0, false, err
+	}
+	if len(data) != 4 || data[0] != reportMessageType {
+		return "", 0, 0, false, nil
+	}
+
+	clientId, ok := data[1].(string)
+	if !ok {
+		return "", 0, 0, false, errors.New("Report message client id is not a string")
+	}
+	replicaId, ok := data[2].(float64)
+	if !ok {
+		return "", 0, 0, false, errors.New("Report message replica id is not a number")
+	}
+	count, ok := data[3].(float64)
+	if !ok {
+		return "", 0, 0, false, errors.New("Report message count is not a number")
+	}
+
+	return clientId, int(replicaId), int(count), true, nil
 }
