@@ -2,6 +2,7 @@ package sum
 
 import (
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"sync"
 
@@ -50,22 +51,25 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
-	outputRouteKeys := make([]string, config.AggregationAmount)
+	outputExchanges := make([]middleware.Middleware, config.AggregationAmount)
 	for i := range config.AggregationAmount {
-		outputRouteKeys[i] = fmt.Sprintf("%s_%d", config.AggregationPrefix, i)
-	}
-	outputExchange, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, outputRouteKeys, connSettings)
-	if err != nil {
-		inputQueue.Close()
-		controlExchange.Close()
-		return nil, err
+		routeKey := fmt.Sprintf("%s_%d", config.AggregationPrefix, i)
+		outputExchanges[i], err = middleware.CreateExchangeMiddleware(config.AggregationPrefix, []string{routeKey}, connSettings)
+		if err != nil {
+			inputQueue.Close()
+			controlExchange.Close()
+			for _, outputExchange := range outputExchanges[:i] {
+				outputExchange.Close()
+			}
+			return nil, err
+		}
 	}
 
 	return &Sum{
 		id:              config.Id,
 		inputQueue:      inputQueue,
 		controlExchange: controlExchange,
-		outputExchanges: []middleware.Middleware{outputExchange},
+		outputExchanges: outputExchanges,
 		clients:         map[string]map[string]fruititem.FruitItem{},
 		counts:          map[string]int{},
 		totals:          map[string]int{},
@@ -217,13 +221,13 @@ func (sum *Sum) flushClient(clientId string) error {
 	delete(sum.reports, clientId)
 	sum.mu.Unlock()
 
-	outputExchange := sum.outputExchanges[0]
-	for _, fruitItem := range fruitItemMap {
+	for fruit, fruitItem := range fruitItemMap {
 		message, err := inner.SerializeDataMessage(clientId, fruitItem)
 		if err != nil {
 			return err
 		}
-		if err := outputExchange.Send(*message); err != nil {
+		partition := hashFruit(fruit) % uint32(len(sum.outputExchanges))
+		if err := sum.outputExchanges[partition].Send(*message); err != nil {
 			return err
 		}
 	}
@@ -232,8 +236,10 @@ func (sum *Sum) flushClient(clientId string) error {
 	if err != nil {
 		return err
 	}
-	if err := outputExchange.Send(*eofMessage); err != nil {
-		return err
+	for _, outputExchange := range sum.outputExchanges {
+		if err := outputExchange.Send(*eofMessage); err != nil {
+			return err
+		}
 	}
 
 	slog.Info("Flushed client data", "client", clientId, "fruits", len(fruitItemMap))
@@ -263,4 +269,10 @@ func (sum *Sum) handleDataMessage(clientId string, fruitRecord fruititem.FruitIt
 	if roundOpen {
 		sum.reportCount(clientId, count)
 	}
+}
+
+func hashFruit(fruit string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(fruit))
+	return h.Sum32()
 }
