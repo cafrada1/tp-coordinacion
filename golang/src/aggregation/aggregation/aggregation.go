@@ -74,25 +74,20 @@ func (aggregation *Aggregation) Stop() {
 func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	if clientId, fruitRecord, isData, err := inner.DeserializeDataMessage(&msg); err != nil {
+	parsed, err := inner.Deserialize(&msg)
+	if err != nil {
 		slog.Error("While deserializing message", "err", err)
-		return
-	} else if isData {
-		aggregation.handleDataMessage(clientId, fruitRecord)
 		return
 	}
 
-	if clientId, _, isEOF, err := inner.DeserializeEOFMessage(&msg); err != nil {
-		slog.Error("While deserializing message", "err", err)
-		return
-	} else if isEOF {
-		if err := aggregation.handleEndOfRecordsMessage(clientId); err != nil {
+	switch m := parsed.(type) {
+	case inner.Data:
+		aggregation.handleDataMessage(m.ClientID, m.Record)
+	case inner.EOF:
+		if err := aggregation.handleEndOfRecordsMessage(m.ClientID); err != nil {
 			slog.Error("While handling end of records message", "err", err)
 		}
-		return
 	}
-
-	slog.Error("Received message of unknown type")
 }
 
 func (aggregation *Aggregation) handleDataMessage(clientId string, fruitRecord fruititem.FruitItem) {
@@ -122,7 +117,7 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientId string) error
 	}
 
 	fruitTop := buildFruitTop(state.fruitItemMap, aggregation.topSize)
-	message, err := inner.SerializeTopMessage(clientId, fruitTop)
+	message, err := inner.Serialize(inner.Top{ClientID: clientId, Fruits: fruitTop})
 	if err != nil {
 		return err
 	}

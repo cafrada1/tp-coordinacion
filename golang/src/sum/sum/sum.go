@@ -103,47 +103,39 @@ func (sum *Sum) Stop() {
 func (sum *Sum) handleInputMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	if clientId, fruitRecord, isData, err := inner.DeserializeDataMessage(&msg); err != nil {
+	parsed, err := inner.Deserialize(&msg)
+	if err != nil {
 		slog.Error("While deserializing message", "err", err)
-		return
-	} else if isData {
-		sum.handleDataMessage(clientId, fruitRecord)
 		return
 	}
 
-	if clientId, total, isEOF, err := inner.DeserializeEOFMessage(&msg); err != nil {
-		slog.Error("While deserializing message", "err", err)
-		return
-	} else if isEOF {
-		if err := sum.forwardEOF(clientId, total); err != nil {
+	switch m := parsed.(type) {
+	case inner.Data:
+		sum.handleDataMessage(m.ClientID, m.Record)
+	case inner.EOF:
+		if err := sum.forwardEOF(m.ClientID, m.Total); err != nil {
 			slog.Error("While forwarding EOF message", "err", err)
 		}
-		return
 	}
-
-	slog.Error("Received message of unknown type")
 }
 
 func (sum *Sum) handleControlMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	if clientId, total, isEOF, err := inner.DeserializeEOFMessage(&msg); err != nil {
+	parsed, err := inner.Deserialize(&msg)
+	if err != nil {
 		slog.Error("While deserializing control message", "err", err)
-		return
-	} else if isEOF {
-		sum.openRound(clientId, total)
 		return
 	}
 
-	if clientId, replicaId, count, isReport, err := inner.DeserializeReportMessage(&msg); err != nil {
-		slog.Error("While deserializing control message", "err", err)
-		return
-	} else if isReport {
-		sum.applyReport(clientId, replicaId, count)
-		return
+	switch m := parsed.(type) {
+	case inner.EOF:
+		sum.openRound(m.ClientID, m.Total)
+	case inner.Report:
+		sum.applyReport(m.ClientID, m.ReplicaID, m.Count)
+	default:
+		slog.Error("Received control message of unknown type")
 	}
-
-	slog.Error("Received control message of unknown type")
 }
 
 func (sum *Sum) openRound(clientId string, total int) {
@@ -188,7 +180,7 @@ func (sum *Sum) roundComplete(clientId string) bool {
 }
 
 func (sum *Sum) forwardEOF(clientId string, total int) error {
-	message, err := inner.SerializeEOFMessage(clientId, total)
+	message, err := inner.Serialize(inner.EOF{ClientID: clientId, Total: total})
 	if err != nil {
 		return err
 	}
@@ -196,7 +188,7 @@ func (sum *Sum) forwardEOF(clientId string, total int) error {
 }
 
 func (sum *Sum) reportCount(clientId string, count int) {
-	message, err := inner.SerializeReportMessage(clientId, sum.id, count)
+	message, err := inner.Serialize(inner.Report{ClientID: clientId, ReplicaID: sum.id, Count: count})
 	if err != nil {
 		slog.Error("While serializing report message", "err", err)
 		return
@@ -207,32 +199,25 @@ func (sum *Sum) reportCount(clientId string, count int) {
 }
 
 func (sum *Sum) flushClient(clientId string) error {
-	sum.mu.Lock()
-	if sum.flushed[clientId] {
-		sum.mu.Unlock()
+	fruitItemMap, total, ok := sum.alreadyFlushed(clientId)
+	if ok {
 		return nil
 	}
-	sum.flushed[clientId] = true
-	fruitItemMap := sum.clients[clientId]
-	total := sum.totals[clientId]
-	delete(sum.clients, clientId)
-	delete(sum.counts, clientId)
-	delete(sum.totals, clientId)
-	delete(sum.reports, clientId)
-	sum.mu.Unlock()
 
 	for fruit, fruitItem := range fruitItemMap {
-		message, err := inner.SerializeDataMessage(clientId, fruitItem)
+		message, err := inner.Serialize(inner.Data{ClientID: clientId, Record: fruitItem})
 		if err != nil {
 			return err
 		}
+
 		partition := hashFruit(fruit) % uint32(len(sum.outputExchanges))
-		if err := sum.outputExchanges[partition].Send(*message); err != nil {
+		err = sum.outputExchanges[partition].Send(*message)
+		if err != nil {
 			return err
 		}
 	}
 
-	eofMessage, err := inner.SerializeEOFMessage(clientId, total)
+	eofMessage, err := inner.Serialize(inner.EOF{ClientID: clientId, Total: total})
 	if err != nil {
 		return err
 	}
@@ -244,6 +229,28 @@ func (sum *Sum) flushClient(clientId string) error {
 
 	slog.Info("Flushed client data", "client", clientId, "fruits", len(fruitItemMap))
 	return nil
+}
+
+func (sum *Sum) alreadyFlushed(clientId string) (map[string]fruititem.FruitItem, int, bool) {
+	sum.mu.Lock()
+	defer sum.mu.Unlock()
+	if sum.flushed[clientId] {
+		return nil, 0, true
+	}
+
+	sum.flushed[clientId] = true
+	fruitItemMap := sum.clients[clientId]
+	total := sum.totals[clientId]
+	sum.deleteClientId(clientId)
+
+	return fruitItemMap, total, false
+}
+
+func (sum *Sum) deleteClientId(clientId string) {
+	delete(sum.clients, clientId)
+	delete(sum.counts, clientId)
+	delete(sum.totals, clientId)
+	delete(sum.reports, clientId)
 }
 
 func (sum *Sum) handleDataMessage(clientId string, fruitRecord fruititem.FruitItem) {

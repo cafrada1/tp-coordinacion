@@ -67,25 +67,26 @@ func (join *Join) Stop() {
 func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	clientId, fruitTop, isTop, err := inner.DeserializeTopMessage(&msg)
+	parsed, err := inner.Deserialize(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
 		return
 	}
-	if !isTop {
+	top, ok := parsed.(inner.Top)
+	if !ok {
 		slog.Error("Received message of unknown type")
 		return
 	}
 
-	tops := append(join.partialTops[clientId], fruitTop)
+	tops := append(join.partialTops[top.ClientID], top.Fruits)
 	if len(tops) < join.aggregationAmount {
-		join.partialTops[clientId] = tops
+		join.partialTops[top.ClientID] = tops
 		return
 	}
 
-	delete(join.partialTops, clientId)
+	delete(join.partialTops, top.ClientID)
 	finalTop := mergeFruitTops(tops, join.topSize)
-	message, err := inner.SerializeTopMessage(clientId, finalTop)
+	message, err := inner.Serialize(inner.Top{ClientID: top.ClientID, Fruits: finalTop})
 	if err != nil {
 		slog.Error("While serializing final top", "err", err)
 		return
@@ -96,7 +97,7 @@ func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func())
 }
 
 func mergeFruitTops(partialTops [][]fruititem.FruitItem, topSize int) []fruititem.FruitItem {
-	fruitItems := []fruititem.FruitItem{}
+	var fruitItems []fruititem.FruitItem
 	for _, top := range partialTops {
 		fruitItems = append(fruitItems, top...)
 	}
