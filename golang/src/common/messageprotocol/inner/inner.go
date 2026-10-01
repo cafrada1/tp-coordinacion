@@ -8,6 +8,8 @@ import (
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
 )
 
+// protocolo interno: array json posicional [tipo, ...] con la
+// etiqueta del mensaje primero. los indices de cada tipo estan en constantes.
 const (
 	dataMessageKind   = "D"
 	eofMessageKind    = "E"
@@ -33,10 +35,14 @@ const (
 	reportCountIndex     = 3
 )
 
+// message es el sobre del protocolo interno: un tipo por cada mensaje del
+// pipeline. el metodo no exportado sella la interfaz, solo los tipos de este
+// paquete la pueden implementar.
 type Message interface {
 	messageKind() string
 }
 
+// serialize convierte el mensaje en el json posicional [tipo, ...].
 func Serialize(message Message) (*middleware.Message, error) {
 	switch m := message.(type) {
 	case Data:
@@ -72,6 +78,8 @@ func Serialize(message Message) (*middleware.Message, error) {
 	}
 }
 
+// deserialize clasifica por su tipo y devuelve el struct del
+// tipo concreto
 func Deserialize(message *middleware.Message) (Message, error) {
 	data, err := deserializeJson([]byte(message.Body))
 	if err != nil {

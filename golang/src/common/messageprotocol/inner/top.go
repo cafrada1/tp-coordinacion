@@ -9,10 +9,11 @@ import (
 
 const (
 	fruitPairFieldsLen = 2
-	fruitNameIndex     = 1
-	fruitAmountIndex   = 2
+	fruitNameIndex     = 0
+	fruitAmountIndex   = 1
 )
 
+// top: top de frutas (parcial o final) de un cliente.
 type Top struct {
 	ClientID string
 	Fruits   []fruititem.FruitItem

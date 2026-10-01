@@ -5,6 +5,8 @@ import (
 	"fmt"
 )
 
+// report: conteo absoluto de registros procesados por una replica de sum
+// para un cliente. viaja solo por el exchange de control.
 type Report struct {
 	ClientID  string
 	ReplicaID int

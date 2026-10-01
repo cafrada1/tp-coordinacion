@@ -21,6 +21,9 @@ type JoinConfig struct {
 	TopSize           int
 }
 
+// Join junta los tops parciales de las replicas de aggregation: cada una
+// envia exactamente un top por cliente, de modo que al juntar
+// AGGREGATION_AMOUNT tops el top global queda completo
 type Join struct {
 	inputQueue        middleware.Middleware
 	outputQueue       middleware.Middleware

@@ -23,6 +23,7 @@ func newExchangeMiddleware(exchange string, keys []string, settings ConnSettings
 		return nil, err
 	}
 
+	// sin claves se asume un exchange de control
 	kind := "direct"
 	if len(keys) == 0 {
 		kind = "fanout"

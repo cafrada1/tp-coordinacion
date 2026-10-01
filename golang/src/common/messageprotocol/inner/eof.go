@@ -5,6 +5,8 @@ import (
 	"fmt"
 )
 
+// eof: fin de la ingesta de un cliente. total es la cantidad de registros
+// que el gateway envio para ese cliente.
 type EOF struct {
 	ClientID string
 	Total    int

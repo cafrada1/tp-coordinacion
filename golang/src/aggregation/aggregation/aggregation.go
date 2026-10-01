@@ -104,6 +104,10 @@ func (aggregation *Aggregation) handleDataMessage(clientId string, fruitRecord f
 	}
 }
 
+// handleEndOfRecordsMessage implementa la barrera de aggregation: cada
+// replica de sum publica sus datos y luego su eof en orden por su propia
+// conexion, asi que al consumir el eof numero SUM_AMOUNT ya se consumieron
+// todos los datos de todas las replicas y el top parcial esta completo
 func (aggregation *Aggregation) handleEndOfRecordsMessage(clientId string) error {
 	state, ok := aggregation.clients[clientId]
 	if !ok {

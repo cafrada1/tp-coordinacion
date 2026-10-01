@@ -22,6 +22,13 @@ type SumConfig struct {
 	AggregationPrefix string
 }
 
+// Sum acumula los pares (fruta, cantidad) por cliente. Las replicas se
+// reparten los registros consumiendo en competencia la cola de entrada, asi
+// que el eof de un cliente llega a una sola y sus datos quedan repartidos
+// entre todas. El vaciado se coordina con una barrera de conteo sobre el
+// exchange de control: el eof trae el total de registros del cliente, cada
+// replica reporta cuanto proceso y, cuando la suma de reportes alcanza el
+// total, todas envian
 type Sum struct {
 	id              int
 	inputQueue      middleware.Middleware
@@ -44,6 +51,8 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
+	// sin claves el middleware declara un fanout: cada replica recibe el
+	// aviso de vaciado de todas las demas
 	controlExchangeName := fmt.Sprintf("%s_control", config.SumPrefix)
 	controlExchange, err := middleware.CreateExchangeMiddleware(controlExchangeName, nil, connSettings)
 	if err != nil {
@@ -51,6 +60,7 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
+	// un middleware por clave de particion
 	outputExchanges := make([]middleware.Middleware, config.AggregationAmount)
 	for i := range config.AggregationAmount {
 		routeKey := fmt.Sprintf("%s_%d", config.AggregationPrefix, i)
@@ -113,6 +123,8 @@ func (sum *Sum) handleInputMessage(msg middleware.Message, ack func(), nack func
 	case inner.Data:
 		sum.handleDataMessage(m.ClientID, m.Record)
 	case inner.EOF:
+		// el eof llego solo a esta replica: se reenvia por el control
+		// para que todas vacien sus parciales de este cliente.
 		if err := sum.forwardEOF(m.ClientID, m.Total); err != nil {
 			slog.Error("While forwarding EOF message", "err", err)
 		}
@@ -138,6 +150,8 @@ func (sum *Sum) handleControlMessage(msg middleware.Message, ack func(), nack fu
 	}
 }
 
+// openRound registra el total esperado del cliente y reporta de inmediato
+// el conteo actual
 func (sum *Sum) openRound(clientId string, total int) {
 	sum.mu.Lock()
 	sum.totals[clientId] = total
@@ -147,6 +161,8 @@ func (sum *Sum) openRound(clientId string, total int) {
 	sum.reportCount(clientId, count)
 }
 
+// applyReport guarda el maximo reportado por cada replica: los conteos son
+// absolutos, asi que una reentrega no infla la suma
 func (sum *Sum) applyReport(clientId string, replicaId int, count int) {
 	sum.mu.Lock()
 	if _, ok := sum.totals[clientId]; !ok {
@@ -171,6 +187,8 @@ func (sum *Sum) applyReport(clientId string, replicaId int, count int) {
 	}
 }
 
+// roundComplete es el invariante de la barrera: la suma de registros
+// reportados como procesados alcanzo el total del cliente
 func (sum *Sum) roundComplete(clientId string) bool {
 	processed := 0
 	for _, count := range sum.reports[clientId] {
@@ -198,6 +216,9 @@ func (sum *Sum) reportCount(clientId string, count int) {
 	}
 }
 
+// flushClient envia los parciales del cliente hacia los aggregators: un
+// mensaje de datos por fruta hacia su particion y un eof por cada
+// particion
 func (sum *Sum) flushClient(clientId string) error {
 	fruitItemMap, total, ok := sum.alreadyFlushed(clientId)
 	if ok {
@@ -231,6 +252,7 @@ func (sum *Sum) flushClient(clientId string) error {
 	return nil
 }
 
+// alreadyFlushed marca el cliente como flushed antes de publicar
 func (sum *Sum) alreadyFlushed(clientId string) (map[string]fruititem.FruitItem, int, bool) {
 	sum.mu.Lock()
 	defer sum.mu.Unlock()
@@ -273,6 +295,8 @@ func (sum *Sum) handleDataMessage(clientId string, fruitRecord fruititem.FruitIt
 	count := sum.counts[clientId]
 	sum.mu.Unlock()
 
+	// si la ronda del cliente esta abierta, cada registro procesado
+	// actualiza el reporte
 	if roundOpen {
 		sum.reportCount(clientId, count)
 	}
