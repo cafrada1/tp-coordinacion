@@ -3,68 +3,119 @@ package inner
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
-	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
 )
 
-func serializeJson(message []interface{}) ([]byte, error) {
+// protocolo interno: array json posicional [tipo, ...] con la
+// etiqueta del mensaje primero. los indices de cada tipo estan en constantes.
+const (
+	dataMessageKind   = "D"
+	eofMessageKind    = "E"
+	topMessageKind    = "T"
+	reportMessageKind = "R"
+
+	eofFieldsLen     = 3
+	eofClientIdIndex = 1
+	eofTotalIndex    = 2
+
+	dataFieldsLen     = 4
+	dataClientIdIndex = 1
+	dataFruitIndex    = 2
+	dataAmountIndex   = 3
+
+	topFieldsLen     = 3
+	topClientIdIndex = 1
+	topFruitsIndex   = 2
+
+	reportFieldsLen      = 4
+	reportClientIdIndex  = 1
+	reportReplicaIdIndex = 2
+	reportCountIndex     = 3
+)
+
+// message un tipo por cada mensaje del pipeline.
+// el metodo no exportado sella la interfaz, solo los tipos de este
+// paquete la pueden implementar.
+type Message interface {
+	messageKind() string
+}
+
+// serialize convierte el mensaje en el json posicional [tipo, ...].
+func Serialize(message Message) (*middleware.Message, error) {
+	switch m := message.(type) {
+	case Data:
+		body, err := serializeJson([]any{dataMessageKind, m.ClientID, m.Record.Fruit, m.Record.Amount})
+		if err != nil {
+			return nil, err
+		}
+		return &middleware.Message{Body: string(body)}, nil
+	case EOF:
+		body, err := serializeJson([]any{eofMessageKind, m.ClientID, m.Total})
+		if err != nil {
+			return nil, err
+		}
+		return &middleware.Message{Body: string(body)}, nil
+	case Top:
+		var fruits []any
+		for _, fruitRecord := range m.Fruits {
+			fruits = append(fruits, []any{fruitRecord.Fruit, fruitRecord.Amount})
+		}
+		body, err := serializeJson([]any{topMessageKind, m.ClientID, fruits})
+		if err != nil {
+			return nil, err
+		}
+		return &middleware.Message{Body: string(body)}, nil
+	case Report:
+		body, err := serializeJson([]any{reportMessageKind, m.ClientID, m.ReplicaID, m.Count})
+		if err != nil {
+			return nil, err
+		}
+		return &middleware.Message{Body: string(body)}, nil
+	default:
+		return nil, fmt.Errorf("cannot serialize message of kind %q", message.messageKind())
+	}
+}
+
+// deserialize clasifica por su tipo y devuelve el struct del
+// tipo concreto
+func Deserialize(message *middleware.Message) (Message, error) {
+	data, err := deserializeJson([]byte(message.Body))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, errors.New("message is empty")
+	}
+
+	kind, ok := data[0].(string)
+	if !ok {
+		return nil, errors.New("message kind is not a string")
+	}
+
+	switch kind {
+	case dataMessageKind:
+		return deserializeData(data)
+	case eofMessageKind:
+		return deserializeEOF(data)
+	case topMessageKind:
+		return deserializeTop(data)
+	case reportMessageKind:
+		return deserializeReport(data)
+	default:
+		return nil, fmt.Errorf("unknown message kind %q", kind)
+	}
+}
+
+func serializeJson(message []any) ([]byte, error) {
 	return json.Marshal(message)
 }
 
-func deserializeJson(message []byte) ([]interface{}, error) {
-	var data []interface{}
+func deserializeJson(message []byte) ([]any, error) {
+	var data []any
 	if err := json.Unmarshal(message, &data); err != nil {
 		return nil, err
 	}
 	return data, nil
-}
-
-func SerializeMessage(fruitRecords []fruititem.FruitItem) (*middleware.Message, error) {
-	data := []interface{}{}
-	for _, fruitRecord := range fruitRecords {
-		datum := []interface{}{
-			fruitRecord.Fruit,
-			fruitRecord.Amount,
-		}
-		data = append(data, datum)
-	}
-
-	body, err := serializeJson(data)
-	if err != nil {
-		return nil, err
-	}
-	message := middleware.Message{Body: string(body)}
-
-	return &message, nil
-}
-
-func DeserializeMessage(message *middleware.Message) ([]fruititem.FruitItem, bool, error) {
-	data, err := deserializeJson([]byte((*message).Body))
-	if err != nil {
-		return nil, false, err
-	}
-
-	fruitRecords := []fruititem.FruitItem{}
-	for _, datum := range data {
-		fruitPair, ok := datum.([]interface{})
-		if !ok {
-			return nil, false, errors.New("Datum is not an array")
-		}
-
-		fruit, ok := fruitPair[0].(string)
-		if !ok {
-			return nil, false, errors.New("Datum is not a (fruit, amount) pair")
-		}
-
-		fruitAmount, ok := fruitPair[1].(float64)
-		if !ok {
-			return nil, false, errors.New("Datum is not a (fruit, amount) pair")
-		}
-
-		fruitRecord := fruititem.FruitItem{Fruit: fruit, Amount: uint32(fruitAmount)}
-		fruitRecords = append(fruitRecords, fruitRecord)
-	}
-
-	return fruitRecords, len(fruitRecords) == 0, nil
 }

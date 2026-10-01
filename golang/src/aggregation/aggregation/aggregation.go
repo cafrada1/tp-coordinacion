@@ -22,11 +22,17 @@ type AggregationConfig struct {
 	TopSize           int
 }
 
+type clientState struct {
+	fruitItemMap map[string]fruititem.FruitItem
+	eofCount     int
+}
+
 type Aggregation struct {
 	outputQueue   middleware.Middleware
 	inputExchange middleware.Middleware
-	fruitItemMap  map[string]fruititem.FruitItem
+	sumAmount     int
 	topSize       int
+	clients       map[string]*clientState
 }
 
 func NewAggregation(config AggregationConfig) (*Aggregation, error) {
@@ -47,81 +53,95 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 	return &Aggregation{
 		outputQueue:   outputQueue,
 		inputExchange: inputExchange,
-		fruitItemMap:  map[string]fruititem.FruitItem{},
+		sumAmount:     config.SumAmount,
 		topSize:       config.TopSize,
+		clients:       map[string]*clientState{},
 	}, nil
 }
 
 func (aggregation *Aggregation) Run() {
-	aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
-		aggregation.handleMessage(msg, ack, nack)
-	})
+	if err := aggregation.inputExchange.StartConsuming(aggregation.handleMessage); err != nil {
+		slog.Error("While consuming input exchange", "err", err)
+	}
+}
+
+func (aggregation *Aggregation) Stop() {
+	aggregation.inputExchange.StopConsuming()
+	aggregation.inputExchange.Close()
+	aggregation.outputQueue.Close()
 }
 
 func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
+	parsed, err := inner.Deserialize(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
 		return
 	}
 
-	if isEof {
-		if err := aggregation.handleEndOfRecordsMessage(); err != nil {
-			slog.Error("While handling end of record message", "err", err)
+	switch m := parsed.(type) {
+	case inner.Data:
+		aggregation.handleDataMessage(m.ClientID, m.Record)
+	case inner.EOF:
+		if err := aggregation.handleEndOfRecordsMessage(m.ClientID); err != nil {
+			slog.Error("While handling end of records message", "err", err)
 		}
-		return
 	}
-
-	aggregation.handleDataMessage(fruitRecords)
 }
 
-func (aggregation *Aggregation) handleEndOfRecordsMessage() error {
-	slog.Info("Received End Of Records message")
+func (aggregation *Aggregation) handleDataMessage(clientId string, fruitRecord fruititem.FruitItem) {
+	state, ok := aggregation.clients[clientId]
+	if !ok {
+		state = &clientState{fruitItemMap: map[string]fruititem.FruitItem{}}
+		aggregation.clients[clientId] = state
+	}
 
-	fruitTopRecords := aggregation.buildFruitTop()
-	message, err := inner.SerializeMessage(fruitTopRecords)
+	if current, ok := state.fruitItemMap[fruitRecord.Fruit]; ok {
+		state.fruitItemMap[fruitRecord.Fruit] = current.Sum(fruitRecord)
+	} else {
+		state.fruitItemMap[fruitRecord.Fruit] = fruitRecord
+	}
+}
+
+// handleEndOfRecordsMessage implementa la barrera de aggregation: cada
+// replica de sum publica sus datos y luego su eof en orden por su propia
+// conexion, asi que al consumir el eof numero SUM_AMOUNT ya se consumieron
+// todos los datos de todas las replicas y el top parcial esta completo
+func (aggregation *Aggregation) handleEndOfRecordsMessage(clientId string) error {
+	state, ok := aggregation.clients[clientId]
+	if !ok {
+		state = &clientState{fruitItemMap: map[string]fruititem.FruitItem{}}
+		aggregation.clients[clientId] = state
+	}
+
+	state.eofCount++
+	if state.eofCount < aggregation.sumAmount {
+		return nil
+	}
+
+	fruitTop := buildFruitTop(state.fruitItemMap, aggregation.topSize)
+	message, err := inner.Serialize(inner.Top{ClientID: clientId, Fruits: fruitTop})
 	if err != nil {
-		slog.Debug("While serializing top message", "err", err)
 		return err
 	}
 	if err := aggregation.outputQueue.Send(*message); err != nil {
-		slog.Debug("While sending top message", "err", err)
 		return err
 	}
 
-	eofMessage := []fruititem.FruitItem{}
-	message, err = inner.SerializeMessage(eofMessage)
-	if err != nil {
-		slog.Debug("While serializing EOF message", "err", err)
-		return err
-	}
-	if err := aggregation.outputQueue.Send(*message); err != nil {
-		slog.Debug("While sending EOF message", "err", err)
-		return err
-	}
+	delete(aggregation.clients, clientId)
+	slog.Info("Sent partial top", "client", clientId, "fruits", len(state.fruitItemMap))
 	return nil
 }
 
-func (aggregation *Aggregation) handleDataMessage(fruitRecords []fruititem.FruitItem) {
-	for _, fruitRecord := range fruitRecords {
-		if _, ok := aggregation.fruitItemMap[fruitRecord.Fruit]; ok {
-			aggregation.fruitItemMap[fruitRecord.Fruit] = aggregation.fruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
-		} else {
-			aggregation.fruitItemMap[fruitRecord.Fruit] = fruitRecord
-		}
-	}
-}
-
-func (aggregation *Aggregation) buildFruitTop() []fruititem.FruitItem {
-	fruitItems := make([]fruititem.FruitItem, 0, len(aggregation.fruitItemMap))
-	for _, item := range aggregation.fruitItemMap {
+func buildFruitTop(fruitItemMap map[string]fruititem.FruitItem, topSize int) []fruititem.FruitItem {
+	fruitItems := make([]fruititem.FruitItem, 0, len(fruitItemMap))
+	for _, item := range fruitItemMap {
 		fruitItems = append(fruitItems, item)
 	}
 	sort.SliceStable(fruitItems, func(i, j int) bool {
 		return fruitItems[j].Less(fruitItems[i])
 	})
-	finalTopSize := min(aggregation.topSize, len(fruitItems))
+	finalTopSize := min(topSize, len(fruitItems))
 	return fruitItems[:finalTopSize]
 }
