@@ -50,3 +50,4 @@ llega a **exactamente un** aggregator y una sola vez, eliminando el broadcast re
 Como cada réplica de Sum publica sus datos y luego su `E` **en orden sobre su propia conexión**, 
 al consumir el EOF Nº `SUM_AMOUNT` ya se consumieron todos los datos de todas las réplicas. Ahí calcula el top parcial.
 - **Join** junta `AGGREGATION_AMOUNT` tops `T` por cliente, los fusiona y publica el top final.
+

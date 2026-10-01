@@ -35,8 +35,8 @@ const (
 	reportCountIndex     = 3
 )
 
-// message es el sobre del protocolo interno: un tipo por cada mensaje del
-// pipeline. el metodo no exportado sella la interfaz, solo los tipos de este
+// message un tipo por cada mensaje del pipeline.
+// el metodo no exportado sella la interfaz, solo los tipos de este
 // paquete la pueden implementar.
 type Message interface {
 	messageKind() string
